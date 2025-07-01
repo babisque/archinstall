@@ -536,10 +536,20 @@ class Installer:
 			with open(pacman_config, 'a') as fp:
 				fp.write(repositories_config)
 
-		regions_config = mirror_config.regions_config(speed_sort=True)
-		if regions_config:
-			debug(f'Mirrorlist:\n{regions_config}')
-			mirrorlist_config.write_text(regions_config)
+		if mirror_config.reflector.enabled:
+			if mirror_config.apply_reflector_config(mirrorlist_config):
+				info('Reflector successfully applied mirror configuration')
+			else:
+				warn('Reflector failed, falling back to manual mirror configuration')
+				regions_config = mirror_config.regions_config(speed_sort=True)
+				if regions_config:
+					debug(f'Mirrorlist:\n{regions_config}')
+					mirrorlist_config.write_text(regions_config)
+		else:
+			regions_config = mirror_config.regions_config(speed_sort=True)
+			if regions_config:
+				debug(f'Mirrorlist:\n{regions_config}')
+				mirrorlist_config.write_text(regions_config)
 
 		custom_servers = mirror_config.custom_servers_config()
 		if custom_servers:

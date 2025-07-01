@@ -6,6 +6,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TypedDict, override
+from pathlib import Path
 
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -157,6 +158,85 @@ class SignOption(Enum):
 	TrustAll = 'TrustAll'
 
 
+class ReflectorSortOrder(Enum):
+	Age = 'age'
+	Rate = 'rate'
+	Country = 'country'
+	Score = 'score'
+	Delay = 'delay'
+
+
+class ReflectorProtocol(Enum):
+	HTTP = 'http'
+	HTTPS = 'https'
+	FTP = 'ftp'
+	RSYNC = 'rsync'
+
+
+@dataclass
+class ReflectorConfiguration:
+	enabled: bool = False
+	countries: list[str] = field(default_factory=list)
+	protocols: list[ReflectorProtocol] = field(default_factory=lambda: [ReflectorProtocol.HTTPS])
+	age: int = 12  # hours
+	latest: int = 20  # number of mirrors
+	sort_order: ReflectorSortOrder = ReflectorSortOrder.Rate
+	verbose: bool = True
+
+	def to_command_args(self) -> list[str]:
+		"""Convert configuration to reflector command arguments"""
+		args = ['reflector']
+		
+		if self.verbose:
+			args.append('--verbose')
+		
+		if self.countries:
+			args.extend(['--country', ','.join(self.countries)])
+		
+		if self.protocols:
+			protocol_names = [p.value for p in self.protocols]
+			args.extend(['--protocol', ','.join(protocol_names)])
+		
+		args.extend([
+			'--age', str(self.age),
+			'--latest', str(self.latest),
+			'--sort', self.sort_order.value
+		])
+		
+		return args
+
+	def to_command_string(self) -> str:
+		"""Convert configuration to a complete reflector command string"""
+		args = self.to_command_args()
+		args.extend(['--save', '/etc/pacman.d/mirrorlist'])
+		return 'sudo ' + ' '.join(args)
+
+	def json(self) -> dict[str, Any]:
+		return {
+			'enabled': self.enabled,
+			'countries': self.countries,
+			'protocols': [p.value for p in self.protocols],
+			'age': self.age,
+			'latest': self.latest,
+			'sort_order': self.sort_order.value,
+			'verbose': self.verbose,
+		}
+
+	@classmethod
+	def parse_args(cls, args: dict[str, Any]) -> 'ReflectorConfiguration':
+		config = ReflectorConfiguration()
+		
+		config.enabled = args.get('enabled', False)
+		config.countries = args.get('countries', [])
+		config.protocols = [ReflectorProtocol(p) for p in args.get('protocols', ['https'])]
+		config.age = args.get('age', 12)
+		config.latest = args.get('latest', 20)
+		config.sort_order = ReflectorSortOrder(args.get('sort_order', 'rate'))
+		config.verbose = args.get('verbose', True)
+		
+		return config
+
+
 class _CustomRepositorySerialization(TypedDict):
 	name: str
 	url: str
@@ -229,6 +309,7 @@ class _MirrorConfigurationSerialization(TypedDict):
 	custom_servers: list[CustomServer]
 	optional_repositories: list[str]
 	custom_repositories: list[_CustomRepositorySerialization]
+	reflector: dict[str, Any]
 
 
 @dataclass
@@ -237,6 +318,7 @@ class MirrorConfiguration:
 	custom_servers: list[CustomServer] = field(default_factory=list)
 	optional_repositories: list[Repository] = field(default_factory=list)
 	custom_repositories: list[CustomRepository] = field(default_factory=list)
+	reflector: ReflectorConfiguration = field(default_factory=ReflectorConfiguration)
 
 	@property
 	def region_names(self) -> str:
@@ -256,6 +338,7 @@ class MirrorConfiguration:
 			'custom_servers': self.custom_servers,
 			'optional_repositories': [r.value for r in self.optional_repositories],
 			'custom_repositories': [c.json() for c in self.custom_repositories],
+			'reflector': self.reflector.json(),
 		}
 
 	def custom_servers_config(self) -> str:
@@ -296,6 +379,13 @@ class MirrorConfiguration:
 
 		return config
 
+	def apply_reflector_config(self, target_path: Path = None) -> bool:
+		"""Apply reflector configuration to generate mirrorlist"""
+		if self.reflector.enabled:
+			from ..mirrors import mirror_list_handler
+			return mirror_list_handler.run_reflector(self.reflector, target_path)
+		return False
+
 	@classmethod
 	def parse_args(
 		cls,
@@ -325,5 +415,8 @@ class MirrorConfiguration:
 			for r in backwards_compatible_repo:
 				if r not in config.optional_repositories:
 					config.optional_repositories.append(r)
+
+		if 'reflector' in args:
+			config.reflector = ReflectorConfiguration.parse_args(args['reflector'])
 
 		return config

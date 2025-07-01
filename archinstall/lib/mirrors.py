@@ -9,6 +9,7 @@ from archinstall.tui.menu_item import MenuItem, MenuItemGroup
 from archinstall.tui.result import ResultType
 from archinstall.tui.types import Alignment, FrameProperties
 
+from .general import SysCommand
 from .menu.abstract_menu import AbstractSubMenu
 from .menu.list_manager import ListManager
 from .models.mirrors import (
@@ -18,12 +19,15 @@ from .models.mirrors import (
 	MirrorRegion,
 	MirrorStatusEntryV3,
 	MirrorStatusListV3,
+	ReflectorConfiguration,
+	ReflectorProtocol,
+	ReflectorSortOrder,
 	SignCheck,
 	SignOption,
 )
 from .models.packages import Repository
 from .networking import fetch_data_from_url
-from .output import FormattedOutput, debug
+from .output import FormattedOutput, debug, info, warn
 
 
 class CustomMirrorRepositoriesList(ListManager[CustomRepository]):
@@ -236,6 +240,13 @@ class MirrorMenu(AbstractSubMenu[MirrorConfiguration]):
 				key='mirror_regions',
 			),
 			MenuItem(
+				text=tr('Use reflector'),
+				action=configure_reflector,
+				value=self._mirror_config.reflector,
+				preview_action=self._prev_reflector,
+				key='reflector',
+			),
+			MenuItem(
 				text=tr('Add custom servers'),
 				action=add_custom_mirror_servers,
 				value=self._mirror_config.custom_servers,
@@ -293,6 +304,26 @@ class MirrorMenu(AbstractSubMenu[MirrorConfiguration]):
 
 		custom_servers: list[CustomServer] = item.value
 		output = '\n'.join([server.url for server in custom_servers])
+		return output.strip()
+
+	def _prev_reflector(self, item: MenuItem) -> str | None:
+		if not item.value:
+			return None
+
+		reflector_config: ReflectorConfiguration = item.value
+		if not reflector_config.enabled:
+			return tr('Reflector disabled')
+
+		output = f"{tr('Enabled')}: {tr('Yes')}\n"
+		if reflector_config.countries:
+			output += f"{tr('Countries')}: {', '.join(reflector_config.countries)}\n"
+		output += f"{tr('Protocols')}: {', '.join([p.value for p in reflector_config.protocols])}\n"
+		output += f"{tr('Age')}: {reflector_config.age} {tr('hours')}\n"
+		output += f"{tr('Latest')}: {reflector_config.latest} {tr('mirrors')}\n"
+		output += f"{tr('Sort order')}: {reflector_config.sort_order.value}\n\n"
+		
+		output += f"{tr('Command')}: {reflector_config.to_command_string()}"
+		
 		return output.strip()
 
 	@override
@@ -375,6 +406,130 @@ def select_optional_repositories(preset: list[Repository]) -> list[Repository]:
 			return []
 		case ResultType.Selection:
 			return result.get_values()
+
+
+def configure_reflector(preset: ReflectorConfiguration = None) -> ReflectorConfiguration:
+	if preset is None:
+		preset = ReflectorConfiguration()
+
+	enabled_items = [
+		MenuItem(tr('Yes'), value=True),
+		MenuItem(tr('No'), value=False),
+	]
+	enabled_group = MenuItemGroup(enabled_items, sort_items=False)
+	enabled_group.set_selected_by_value(preset.enabled)
+
+	result = SelectMenu[bool](
+		enabled_group,
+		alignment=Alignment.CENTER,
+		frame=FrameProperties.min(tr('Use reflector for mirror selection')),
+		allow_skip=True,
+	).run()
+
+	match result.type_:
+		case ResultType.Skip:
+			return preset
+		case ResultType.Selection:
+			preset.enabled = result.get_value()
+
+	if not preset.enabled:
+		return preset
+
+	Tui.print(tr('Loading available countries...'), clear_screen=True)
+	mirror_list_handler.load_mirrors()
+	available_regions = mirror_list_handler.get_mirror_regions()
+	available_countries = [region.name for region in available_regions if region.name != 'Worldwide']
+
+	if available_countries:
+		country_items = [MenuItem(country, value=country) for country in available_countries]
+		country_group = MenuItemGroup(country_items, sort_items=True)
+		country_group.set_selected_by_value(preset.countries)
+
+		result = SelectMenu[str](
+			country_group,
+			alignment=Alignment.CENTER,
+			frame=FrameProperties.min(tr('Select countries for reflector')),
+			allow_reset=True,
+			allow_skip=True,
+			multi=True,
+		).run()
+
+		match result.type_:
+			case ResultType.Skip:
+				pass
+			case ResultType.Reset:
+				preset.countries = []
+			case ResultType.Selection:
+				preset.countries = result.get_values()
+
+	protocol_items = [MenuItem(protocol.value.upper(), value=protocol) for protocol in ReflectorProtocol]
+	protocol_group = MenuItemGroup(protocol_items, sort_items=False)
+	protocol_group.set_selected_by_value(preset.protocols)
+
+	result = SelectMenu[ReflectorProtocol](
+		protocol_group,
+		alignment=Alignment.CENTER,
+		frame=FrameProperties.min(tr('Select protocols')),
+		allow_skip=True,
+		multi=True,
+	).run()
+
+	match result.type_:
+		case ResultType.Skip:
+			pass
+		case ResultType.Selection:
+			preset.protocols = result.get_values()
+
+	age_result = EditMenu(
+		tr('Age limit (hours)'),
+		alignment=Alignment.CENTER,
+		allow_skip=True,
+		default_text=str(preset.age),
+	).input()
+
+	match age_result.type_:
+		case ResultType.Selection:
+			try:
+				preset.age = int(age_result.text())
+			except ValueError:
+				pass  
+		case ResultType.Skip:
+			pass
+
+	latest_result = EditMenu(
+		tr('Number of latest mirrors'),
+		alignment=Alignment.CENTER,
+		allow_skip=True,
+		default_text=str(preset.latest),
+	).input()
+
+	match latest_result.type_:
+		case ResultType.Selection:
+			try:
+				preset.latest = int(latest_result.text())
+			except ValueError:
+				pass 
+		case ResultType.Skip:
+			pass
+
+	sort_items = [MenuItem(sort_order.value.title(), value=sort_order) for sort_order in ReflectorSortOrder]
+	sort_group = MenuItemGroup(sort_items, sort_items=False)
+	sort_group.set_selected_by_value(preset.sort_order)
+
+	result = SelectMenu[ReflectorSortOrder](
+		sort_group,
+		alignment=Alignment.CENTER,
+		frame=FrameProperties.min(tr('Select sort order')),
+		allow_skip=True,
+	).run()
+
+	match result.type_:
+		case ResultType.Skip:
+			pass
+		case ResultType.Selection:
+			preset.sort_order = result.get_value()
+
+	return preset
 
 
 class MirrorListHandler:
@@ -514,6 +669,59 @@ class MirrorListHandler:
 				mirror_list[current_region].append(mirror_entry)
 
 		return mirror_list
+
+	def run_reflector(self, reflector_config: ReflectorConfiguration, target_path: Path = None) -> bool:
+		"""
+		Run reflector to generate an optimized mirrorlist
+		
+		Args:
+			reflector_config: Reflector configuration
+			target_path: Path to save the mirrorlist (defaults to /etc/pacman.d/mirrorlist)
+		
+		Returns:
+			True if successful, False otherwise
+		"""
+		if not reflector_config.enabled:
+			return False
+
+		if target_path is None:
+			target_path = self._local_mirrorlist
+
+		if not self._ensure_reflector_installed():
+			return False
+
+		try:
+			cmd_args = reflector_config.to_command_args()
+			cmd_args.extend(['--save', str(target_path)])
+
+			info(f"Running reflector with command: {' '.join(cmd_args)}")
+			
+			result = SysCommand(cmd_args)
+			
+			if result.exit_code == 0:
+				info(f"Reflector successfully updated mirrorlist at {target_path}")
+				return True
+			else:
+				warn(f"Reflector failed with exit code {result.exit_code}")
+				return False
+				
+		except Exception as e:
+			warn(f"Error running reflector: {e}")
+			return False
+
+	def _ensure_reflector_installed(self) -> bool:
+		"""Ensure reflector is installed on the system"""
+		try:
+			SysCommand(['which', 'reflector'])
+			return True
+		except Exception:
+			try:
+				info("Installing reflector...")
+				SysCommand(['pacman', '-Sy', '--noconfirm', 'reflector'])
+				return True
+			except Exception as e:
+				warn(f"Failed to install reflector: {e}")
+				return False
 
 
 mirror_list_handler = MirrorListHandler()
